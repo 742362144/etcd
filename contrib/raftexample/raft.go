@@ -78,6 +78,7 @@ var defaultSnapshotCount uint64 = 10000
 // provided the proposal channel. All log entries are replayed over the
 // commit channel, followed by a nil message (to indicate the channel is
 // current), then new log entries. To shutdown, close proposeC and read errorC.
+
 func newRaftNode(id int, peers []string, join bool, getSnapshot func() ([]byte, error), proposeC <-chan string,
 	confChangeC <-chan raftpb.ConfChange) (<-chan *string, <-chan error, <-chan *snap.Snapshotter) {
 
@@ -263,9 +264,12 @@ func (rc *raftNode) startRaft() {
 			log.Fatalf("raftexample: cannot create dir for snapshot (%v)", err)
 		}
 	}
+	// 快照生成器
 	rc.snapshotter = snap.New(zap.NewExample(), rc.snapdir)
 	rc.snapshotterReady <- rc.snapshotter
 
+	// 获取WAL(write ahead logging)日志
+	// replayWAL replays WAL entries into the raft instance.
 	oldwal := wal.Exist(rc.waldir)
 	rc.wal = rc.replayWAL()
 
@@ -293,6 +297,13 @@ func (rc *raftNode) startRaft() {
 		rc.node = raft.StartNode(c, startPeers)
 	}
 
+	// Transport implements Transporter interface. It provides the functionality
+	// to send raft messages to peers, and receive raft messages from peers.
+	// User should call Handler method to get a handler to serve requests
+	// received from peerURLs.
+	// User needs to call Start before calling other functions, and call
+	// Stop when the Transport is no longer used.
+	// 向其他对等节点发送信息
 	rc.transport = &rafthttp.Transport{
 		Logger:      zap.NewExample(),
 		ID:          types.ID(rc.id),
@@ -441,6 +452,7 @@ func (rc *raftNode) serveChannels() {
 				return
 			}
 			rc.maybeTriggerSnapshot()
+			// Node传来的Ready实例已经被处理完，通知Node可以处理下一批Ready
 			rc.node.Advance()
 
 		case err := <-rc.transport.ErrorC:
@@ -466,6 +478,7 @@ func (rc *raftNode) serveRaft() {
 	}
 
 	err = (&http.Server{Handler: rc.transport.Handler()}).Serve(ln)
+	// 阻塞直到退出
 	select {
 	case <-rc.httpstopc:
 	default:

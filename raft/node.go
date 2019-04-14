@@ -68,6 +68,7 @@ type Ready struct {
 
 	// Entries specifies entries to be saved to stable storage BEFORE
 	// Messages are sent.
+	// 从unstable中读取的，上层模块将其保存到storage中
 	Entries []pb.Entry
 
 	// Snapshot specifies the snapshot to be saved to stable storage.
@@ -76,16 +77,19 @@ type Ready struct {
 	// CommittedEntries specifies entries to be committed to a
 	// store/state-machine. These have previously been committed to stable
 	// store.
+	// 已提交、待应用的Entry记录，这些记录之前已经保存到了Storage中
 	CommittedEntries []pb.Entry
 
 	// Messages specifies outbound messages to be sent AFTER Entries are
 	// committed to stable storage.
 	// If it contains a MsgSnap message, the application MUST report back to raft
 	// when the snapshot has been received or has failed by calling ReportSnapshot.
+	// 当前节点待发送到其他节点的消息
 	Messages []pb.Message
 
 	// MustSync indicates whether the HardState and Entries must be synchronously
 	// written to disk or if an asynchronous write is permissible.
+	// 同步写
 	MustSync bool
 }
 
@@ -103,6 +107,7 @@ func IsEmptySnap(sp pb.Snapshot) bool {
 	return sp.Metadata.Index == 0
 }
 
+// Ready是否需要交给上层处理
 func (rd Ready) containsUpdates() bool {
 	return rd.SoftState != nil || !IsEmptyHardState(rd.HardState) ||
 		!IsEmptySnap(rd.Snapshot) || len(rd.Entries) > 0 ||
@@ -126,17 +131,23 @@ func (rd Ready) appliedCursor() uint64 {
 type Node interface {
 	// Tick increments the internal logical clock for the Node by a single tick. Election
 	// timeouts and heartbeat timeouts are in units of ticks.
+	// 调用raft实例中的tick func来推进逻辑时间，Leader时为tickHeartbeat，Follower时为tickElection
 	Tick()
 	// Campaign causes the Node to transition to candidate state and start campaigning to become leader.
+	// 当选举计时器超时后，调用Campaign将自身切换成Candidate或PreCandidate状态(通过向raft实例发送MsgHup消息实现)开始进行选举
 	Campaign(ctx context.Context) error
 	// Propose proposes that data be appended to the log. Note that proposals can be lost without
 	// notice, therefore it is user's job to ensure proposal retries.
+	// 接收到client发来的写请求时, node实例会调用Proprose方法进行处理
+	// 通过向raft实例发送MsgProp来实现
 	Propose(ctx context.Context, data []byte) error
 	// ProposeConfChange proposes config change.
 	// At most one ConfChange can be in the process of going through consensus.
 	// Application needs to call ApplyConfChange when applying EntryConfChange type entry.
+	// 处理client发来的更改集群配置的请求，通过向raft实例发送MsgProp来实现，只不过其中的Entry是EntryConfChange类型
 	ProposeConfChange(ctx context.Context, cc pb.ConfChange) error
 	// Step advances the state machine using the given message. ctx.Err() will be returned, if any.
+	// 当前节点收到其他节点的消息时，会通过Step方法交给raft实例处理
 	Step(ctx context.Context, msg pb.Message) error
 
 	// Ready returns a channel that returns the current point-in-time state.
@@ -144,6 +155,8 @@ type Node interface {
 	//
 	// NOTE: No committed entries from the next Ready may be applied until all committed entries
 	// and snapshots from the previous one have finished.
+	// 返回一个channel，通过该channel返回的ready实例封装了raft实例的状态数据
+	// 例如，包含了需要发送到其他节点的消息、交给上层模块的Entry记录等，具体见Ready结构体
 	Ready() <-chan Ready
 
 	// Advance notifies the Node that the application has saved progress up to the last Ready.
@@ -155,25 +168,31 @@ type Node interface {
 	// commands. For example. when the last Ready contains a snapshot, the application might take
 	// a long time to apply the snapshot data. To continue receiving Ready without blocking raft
 	// progress, it can call Advance before finishing applying the last ready.
+	// 上层模块处理完上述channel返回的Ready实例后，调用Advance()通知下层的raft实例返回新的Ready实例
 	Advance()
 	// ApplyConfChange applies config change to the local node.
 	// Returns an opaque ConfState protobuf which must be recorded
 	// in snapshots. Will never return nil; it returns a pointer only
 	// to match MemoryStorage.Compact.
+	// 收到集群配置变更请求时，通过调用ApplyConfChange()方法进行处理
 	ApplyConfChange(cc pb.ConfChange) *pb.ConfState
 
 	// TransferLeadership attempts to transfer leadership to the given transferee.
+	// 用于leader的转移
 	TransferLeadership(ctx context.Context, lead, transferee uint64)
 
 	// ReadIndex request a read state. The read state will be set in the ready.
 	// Read state has a read index. Once the application advances further than the read
 	// index, any linearizable read requests issued before the read request can be
 	// processed safely. The read state will have the same rctx attached.
+	// 用于处理只读请求
 	ReadIndex(ctx context.Context, rctx []byte) error
 
+	// 返回当前节点的运行状态
 	// Status returns the current status of the raft state machine.
 	Status() Status
 	// ReportUnreachable reports the given node is not reachable for the last send.
+	// 通知底层的raft实例，当前节点无法与指定的节点通信
 	ReportUnreachable(id uint64)
 	// ReportSnapshot reports the status of the sent snapshot. The id is the raft ID of the follower
 	// who is meant to receive the snapshot, and the status is SnapshotFinish or SnapshotFailure.
@@ -185,8 +204,10 @@ type Node interface {
 	// updates from the leader. Therefore, it is crucial that the application ensures that any
 	// failure in snapshot sending is caught and reported back to the leader; so it can resume raft
 	// log probing in the follower.
+	// 通知下层的raft实例上次快照发送的结果
 	ReportSnapshot(id uint64, status SnapshotStatus)
 	// Stop performs any necessary termination of the Node.
+	// 关闭当前节点
 	Stop()
 }
 
@@ -254,16 +275,16 @@ type msgWithResult struct {
 
 // node is the canonical implementation of the Node interface
 type node struct {
-	propc      chan msgWithResult
-	recvc      chan pb.Message
-	confc      chan pb.ConfChange
-	confstatec chan pb.ConfState
-	readyc     chan Ready
-	advancec   chan struct{}
-	tickc      chan struct{}
-	done       chan struct{}
-	stop       chan struct{}
-	status     chan chan Status
+	propc      chan msgWithResult           // 接收MsgProp消息
+	recvc      chan pb.Message           	// 接收除MsgProp之外的所有消息
+	confc      chan pb.ConfChange           // 接收日志变更请求，写入该通道中等待进行处理
+	confstatec chan pb.ConfState            // 向上层模块返回ConfState实例(包含所有的节点id)
+	readyc     chan Ready                   // 返回Ready实例(包含待处理的消息)
+	advancec   chan struct{}                // 上层模块处理完上述channel返回的Ready实例后，调用Advance()使用该channel通知下层的raft实例返回新的Ready实例
+	tickc      chan struct{}                // 接收逻辑时钟发来的信号，推进选举计时器和心跳计时器
+	done       chan struct{}                // 启动执行关闭操作的goroutine
+	stop       chan struct{}                // Stop方法调用时，向该通道发送信号
+	status     chan chan Status             // node.Status()方法的返回值
 
 	logger Logger
 }
@@ -299,32 +320,37 @@ func (n *node) Stop() {
 }
 
 func (n *node) run(r *raft) {
-	var propc chan msgWithResult
-	var readyc chan Ready
-	var advancec chan struct{}
-	var prevLastUnstablei, prevLastUnstablet uint64
+	var propc chan msgWithResult	                   // 指向node.propc通道
+	var readyc chan Ready	                           // 指向node.readyc通道
+	var advancec chan struct{}                         // 指向node.advancec通道
+	var prevLastUnstablei, prevLastUnstablet uint64    // 用于记录unstable中最后一条Entry记录的索引和任期
 	var havePrevLastUnstablei bool
-	var prevSnapi uint64
+	var prevSnapi uint64                               // 用于记录快照中最后一条记录的索引值
 	var applyingToI uint64
 	var rd Ready
 
-	lead := None
-	prevSoftSt := r.softState()
-	prevHardSt := emptyState
+	lead := None                                       // 记录当前的leader节点id
+	prevSoftSt := r.softState()                        // 记录SoftState(当前leader节点的id和当前节点的角色)
+	prevHardSt := emptyState                           // 记录HardState
 
-	for {
+	for {	// 处理所有的channel
 		if advancec != nil {
+			// 上层模块还在处理上次从readyc通道返回的Ready实例，暂时还不能向readyc写数据
 			readyc = nil
 		} else {
+			// 创建Ready实例
 			rd = newReady(r, prevSoftSt, prevHardSt)
+			// ready实例中是否有要交给上层处理的数据
 			if rd.containsUpdates() {
+				// readyc指向node.readyc通道，接下来会将ready实例通过该通道发送出去
 				readyc = n.readyc
 			} else {
 				readyc = nil
 			}
 		}
 
-		if lead != r.lead {
+		if lead != r.lead {		// 检测当前的leader节点是否发生变化
+			// 如果当前节点无法确定集群中的leader节点，则清空propc，此次循环不再处理MsgProp消息
 			if r.hasLeader() {
 				if lead == None {
 					r.logger.Infof("raft.node: %x elected leader %x at term %d", r.id, r.lead, r.Term)
@@ -336,27 +362,30 @@ func (n *node) run(r *raft) {
 				r.logger.Infof("raft.node: %x lost leader %x at term %d", r.id, lead, r.Term)
 				propc = nil
 			}
-			lead = r.lead
+			lead = r.lead	// 更新leader
 		}
 
 		select {
 		// TODO: maybe buffer the config propose if there exists one (the way
 		// described in raft dissertation)
 		// Currently it is dropped in Step silently.
-		case pm := <-propc:
+		case pm := <-propc: 	// 读取propc通道，接收Propose()传来的client数据请求(MsgPropc消息)
 			m := pm.m
 			m.From = r.id
+			// raft.Step()方法来处理
 			err := r.Step(m)
+			// pm.result是一个通道，负责发送请求处理结果，见stepWithWaitOption()方法
 			if pm.result != nil {
 				pm.result <- err
 				close(pm.result)
 			}
-		case m := <-n.recvc:
+		case m := <-n.recvc:	// 读取recvc通道，接收除MsgProp之外的所有消息，交给
 			// filter out response message from unknown From.
 			if pr := r.getProgress(m.From); pr != nil || !IsResponseMsg(m.Type) {
+				// raft.Step()方法来处理
 				r.Step(m)
 			}
-		case cc := <-n.confc:
+		case cc := <-n.confc:	// 读取node.confc通道，获取ConfChange实例，根据ConfChange的类型进行分类处理
 			if cc.NodeID == None {
 				select {
 				case n.confstatec <- pb.ConfState{
@@ -388,41 +417,52 @@ func (n *node) run(r *raft) {
 				Learners: r.learnerNodes()}:
 			case <-n.done:
 			}
-		case <-n.tickc:
+		case <-n.tickc: 	// 接收逻辑时钟发来的信号，推进选举计时器和心跳计时器
 			r.tick()
-		case readyc <- rd:
+		case readyc <- rd:		// 将前面创建的Ready实例写入node,readyc通道中，等待上层模块读取
+			// 记录本次的SoftState
 			if rd.SoftState != nil {
 				prevSoftSt = rd.SoftState
 			}
 			if len(rd.Entries) > 0 {
+				// 记录Unstable新接收到的日志条目的索引和任期
 				prevLastUnstablei = rd.Entries[len(rd.Entries)-1].Index
 				prevLastUnstablet = rd.Entries[len(rd.Entries)-1].Term
 				havePrevLastUnstablei = true
 			}
+			// 记录本次的HardState
 			if !IsEmptyHardState(rd.HardState) {
 				prevHardSt = rd.HardState
 			}
 			if !IsEmptySnap(rd.Snapshot) {
+				// 记录快照中最后一条记录的索引值
 				prevSnapi = rd.Snapshot.Metadata.Index
 			}
+			// 获得已提交日志记录的最后一条记录的索引
 			if index := rd.appliedCursor(); index != 0 {
 				applyingToI = index
 			}
 
+			// 清空消息
 			r.msgs = nil
 			r.readStates = nil
 			r.reduceUncommittedSize(rd.CommittedEntries)
+			// 表示现在开始处理Ready，暂时不从raft实例获取新的Ready实例进行处理
 			advancec = n.advancec
-		case <-advancec:
+		case <-advancec:	// 上层模块处理完Ready实例后，调用advance()方法，向advancec通道写入信号
 			if applyingToI != 0 {
+				// 更新raftLog.applied字段
 				r.raftLog.appliedTo(applyingToI)
 				applyingToI = 0
 			}
 			if havePrevLastUnstablei {
+				// TODO 处理完了就一定已提交了？？？
+				// Ready中的entries已经被持久化了，将unstable中的对应记录删除
 				r.raftLog.stableTo(prevLastUnstablei, prevLastUnstablet)
 				havePrevLastUnstablei = false
 			}
 			r.raftLog.stableSnapTo(prevSnapi)
+			// 清空advancec，下次for循环中就能向readyc中写入Ready实例了
 			advancec = nil
 		case c := <-n.status:
 			c <- getStatus(r)
@@ -446,6 +486,7 @@ func (n *node) Tick() {
 
 func (n *node) Campaign(ctx context.Context) error { return n.step(ctx, pb.Message{Type: pb.MsgHup}) }
 
+// client提交数据请求，阻塞直到请求返回
 func (n *node) Propose(ctx context.Context, data []byte) error {
 	return n.stepWait(ctx, pb.Message{Type: pb.MsgProp, Entries: []pb.Entry{{Data: data}}})
 }
@@ -471,6 +512,7 @@ func (n *node) step(ctx context.Context, m pb.Message) error {
 	return n.stepWithWaitOption(ctx, m, false)
 }
 
+// client提交数据请求，阻塞直到请求返回
 func (n *node) stepWait(ctx context.Context, m pb.Message) error {
 	return n.stepWithWaitOption(ctx, m, true)
 }
@@ -490,12 +532,13 @@ func (n *node) stepWithWaitOption(ctx context.Context, m pb.Message, wait bool) 
 	}
 	ch := n.propc
 	pm := msgWithResult{m: m}
+	// 传入一个通道，等待结果从该通道中返回
 	if wait {
 		pm.result = make(chan error, 1)
 	}
 	select {
-	case ch <- pm:
-		if !wait {
+	case ch <- pm:		// 把消息写入通道
+		if !wait {		// 不等待则直接返回
 			return nil
 		}
 	case <-ctx.Done():
@@ -504,7 +547,7 @@ func (n *node) stepWithWaitOption(ctx context.Context, m pb.Message, wait bool) 
 		return ErrStopped
 	}
 	select {
-	case rsp := <-pm.result:
+	case rsp := <-pm.result:	// 阻塞直到结果从通道中返回
 		if rsp != nil {
 			return rsp
 		}
@@ -518,9 +561,10 @@ func (n *node) stepWithWaitOption(ctx context.Context, m pb.Message, wait bool) 
 
 func (n *node) Ready() <-chan Ready { return n.readyc }
 
+// 上层处理完Ready实例后，调用Advance()表示可以继续处理新的Ready实例
 func (n *node) Advance() {
 	select {
-	case n.advancec <- struct{}{}:
+	case n.advancec <- struct{}{}: 	// 向advancec写入信号，Ready实例已被处理完成
 	case <-n.done:
 	}
 }
@@ -577,12 +621,17 @@ func (n *node) ReadIndex(ctx context.Context, rctx []byte) error {
 	return n.step(ctx, pb.Message{Type: pb.MsgReadIndex, Entries: []pb.Entry{{Data: rctx}}})
 }
 
+// prevSoftSt、prevHardSt上次创建Ready实例时记录的raft实例的相关状态
 func newReady(r *raft, prevSoftSt *SoftState, prevHardSt pb.HardState) Ready {
 	rd := Ready{
+		// 读取raftLog中unstableEntries(未提交的)，发送给其他Follower
 		Entries:          r.raftLog.unstableEntries(),
+		// 读取raftLog中已提交但未应用的日志记录，进行持久化
 		CommittedEntries: r.raftLog.nextEnts(),
+		// raft实例待发送的消息
 		Messages:         r.msgs,
 	}
+	// 获得SoftState和HardState
 	if softSt := r.softState(); !softSt.equal(prevSoftSt) {
 		rd.SoftState = softSt
 	}
@@ -595,6 +644,7 @@ func newReady(r *raft, prevSoftSt *SoftState, prevHardSt pb.HardState) Ready {
 	if len(r.readStates) != 0 {
 		rd.ReadStates = r.readStates
 	}
+	// 是否需要同步写Storage
 	rd.MustSync = MustSync(r.hardState(), prevHardSt, len(rd.Entries))
 	return rd
 }

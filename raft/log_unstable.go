@@ -22,9 +22,12 @@ import pb "go.etcd.io/etcd/raft/raftpb"
 // might need to truncate the log before persisting unstable.entries.
 type unstable struct {
 	// the incoming unstable snapshot, if any.
+	// 快照数据，该快照数据也是未写入Storage中的
 	snapshot *pb.Snapshot
 	// all entries that have not yet been written to storage.
+	// 未写入Storage中的Entry记录
 	entries []pb.Entry
+	// entries中的第一条Entry记录的索引值
 	offset  uint64
 
 	logger Logger
@@ -74,6 +77,7 @@ func (u *unstable) maybeTerm(i uint64) (uint64, bool) {
 	return u.entries[i-u.offset].Term, true
 }
 
+// 在Entry记录已经被写入Storage中后，将其清除
 func (u *unstable) stableTo(i, t uint64) {
 	gt, ok := u.maybeTerm(i)
 	if !ok {
@@ -93,6 +97,8 @@ func (u *unstable) stableTo(i, t uint64) {
 // if most of it isn't being used. This avoids holding references to a bunch of
 // potentially large entries that aren't needed anymore. Simply clearing the
 // entries wouldn't be safe because clients might still be using them.
+// 随着多次追加日志和截断日志的操作，unstable.entries底层的数组也越来越大
+// shrinkEntriesArray()会在底层数组长度超过时间占用的两倍时，对底层数组进行缩减
 func (u *unstable) shrinkEntriesArray() {
 	// We replace the array if we're using less than half of the space in
 	// it. This number is fairly arbitrary, chosen as an attempt to balance
@@ -114,12 +120,14 @@ func (u *unstable) stableSnapTo(i uint64) {
 	}
 }
 
+// 接收一个快照，重置Entry记录
 func (u *unstable) restore(s pb.Snapshot) {
 	u.offset = s.Metadata.Index + 1
 	u.entries = nil
 	u.snapshot = &s
 }
 
+// 向unstable.entries中追加记录，包含截断记录的场景
 func (u *unstable) truncateAndAppend(ents []pb.Entry) {
 	after := ents[0].Index
 	switch {
@@ -142,12 +150,14 @@ func (u *unstable) truncateAndAppend(ents []pb.Entry) {
 	}
 }
 
+// 在未越界的情况下，截取lo-hi之间的Entry记录
 func (u *unstable) slice(lo uint64, hi uint64) []pb.Entry {
 	u.mustCheckOutOfBounds(lo, hi)
 	return u.entries[lo-u.offset : hi-u.offset]
 }
 
 // u.offset <= lo <= hi <= u.offset+len(u.entries)
+// 查看是否越界
 func (u *unstable) mustCheckOutOfBounds(lo, hi uint64) {
 	if lo > hi {
 		u.logger.Panicf("invalid unstable.slice %d > %d", lo, hi)

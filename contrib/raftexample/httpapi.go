@@ -32,7 +32,7 @@ type httpKVAPI struct {
 func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	key := r.RequestURI
 	switch {
-	case r.Method == "PUT":
+	case r.Method == "PUT":		// 数据提交请求
 		v, err := ioutil.ReadAll(r.Body)
 		if err != nil {
 			log.Printf("Failed to read on PUT (%v)\n", err)
@@ -40,18 +40,19 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// 新Entry由kvstore交给底层的raft模块
 		h.store.Propose(key, string(v))
 
 		// Optimistic-- no waiting for ack from raft. Value is not yet
 		// committed so a subsequent GET on the key may return old value
 		w.WriteHeader(http.StatusNoContent)
-	case r.Method == "GET":
+	case r.Method == "GET": 	// 数据读取请求
 		if v, ok := h.store.Lookup(key); ok {
 			w.Write([]byte(v))
 		} else {
 			http.Error(w, "Failed to GET", http.StatusNotFound)
 		}
-	case r.Method == "POST":
+	case r.Method == "POST":	// 提交集群配置变更请求
 		url, err := ioutil.ReadAll(r.Body)
 		if err != nil {
 			log.Printf("Failed to read on POST (%v)\n", err)
@@ -75,7 +76,7 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		// As above, optimistic that raft will apply the conf change
 		w.WriteHeader(http.StatusNoContent)
-	case r.Method == "DELETE":
+	case r.Method == "DELETE":		// 从集群中删除自身
 		nodeId, err := strconv.ParseUint(key[1:], 0, 64)
 		if err != nil {
 			log.Printf("Failed to convert ID for conf change (%v)\n", err)
@@ -91,7 +92,7 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		// As above, optimistic that raft will apply the conf change
 		w.WriteHeader(http.StatusNoContent)
-	default:
+	default:	// 返回使用帮助信息
 		w.Header().Set("Allow", "PUT")
 		w.Header().Add("Allow", "GET")
 		w.Header().Add("Allow", "POST")
@@ -109,6 +110,7 @@ func serveHttpKVAPI(kv *kvstore, port int, confChangeC chan<- raftpb.ConfChange,
 			confChangeC: confChangeC,
 		},
 	}
+	// 异步监听端口，等待请求并进行处理
 	go func() {
 		if err := srv.ListenAndServe(); err != nil {
 			log.Fatal(err)
@@ -116,6 +118,7 @@ func serveHttpKVAPI(kv *kvstore, port int, confChangeC chan<- raftpb.ConfChange,
 	}()
 
 	// exit when raft goes down
+	// 阻塞直到退出
 	if err, ok := <-errorC; ok {
 		log.Fatal(err)
 	}
