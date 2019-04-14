@@ -14,7 +14,7 @@ require (
 	github.com/gogo/protobuf v1.0.0
 	github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b // indirect
 	github.com/golang/groupcache v0.0.0-20160516000752-02826c3e7903
-	github.com/golang/protobuf v1.2.0
+	github.com/golang/protobuf v1.3.1
 	github.com/google/btree v0.0.0-20180124185431-e89373fe6b4a
 	github.com/google/uuid v1.0.0
 	github.com/gorilla/websocket v0.0.0-20170926233335-4201258b820c // indirect
@@ -49,8 +49,8 @@ require (
 	go.uber.org/atomic v1.3.2 // indirect
 	go.uber.org/multierr v1.1.0 // indirect
 	go.uber.org/zap v1.9.1
-	golang.org/x/crypto v0.0.0-20180608092829-8ac0e0d97ce4
-	golang.org/x/net v0.0.0-20180906233101-161cd47e91fd
+	golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2
+	golang.org/x/net v0.0.0
 	golang.org/x/time v0.0.0-20180412165947-fbb02b2291d2
 	google.golang.org/genproto v0.0.0-20180608181217-32ee49c4dd80 // indirect
 	google.golang.org/grpc v1.14.0
@@ -59,3 +59,7 @@ require (
 	gopkg.in/gemnasium/logrus-airbrake-hook.v2 v2.1.2 // indirect
 	gopkg.in/yaml.v2 v2.2.2
 )
+
+replace golang.org/x/crypto v0.0.0 => github.com/golang/crypto v0.0.0-20190313024323-a1f597ede03a
+
+replace golang.org/x/net v0.0.0 => github.com/golang/net v0.0.0-20190318221613-d196dffd7c2b
